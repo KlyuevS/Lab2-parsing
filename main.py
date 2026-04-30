@@ -9,6 +9,7 @@ from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
+from jsonschema import Draft202012Validator
 
 
 SOURCE_URL = "https://tomcat.apache.org/security-9.html"
@@ -242,9 +243,24 @@ def task_3():
     print("task 3")
 
 
+def task_4():
+    schema = read_json("json_schema.json")
+    data = read_json("result_task_2.json")
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.path))
+
+    if not errors:
+        print("validation ok")
+        return
+
+    for error in errors:
+        path = "$" + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in error.path)
+        print(path, error.message)
+
+
 def main():
     if len(sys.argv) < 2:
-        print("usage: python main.py task1|task2|task3")
+        print("usage: python main.py task1|task2|task3|task4")
         return
 
     if sys.argv[1] == "task1":
@@ -253,6 +269,8 @@ def main():
         task_2()
     elif sys.argv[1] == "task3":
         task_3()
+    elif sys.argv[1] == "task4":
+        task_4()
 
 
 if __name__ == "__main__":
