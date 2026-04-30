@@ -1,18 +1,29 @@
 import json
 import re
 import sys
+import zipfile
 from datetime import datetime
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
 
 
 SOURCE_URL = "https://tomcat.apache.org/security-9.html"
+CVE_API = "https://cveawg.mitre.org/api/cve/"
+CVE_URL = "https://www.cve.org/CVERecord?id="
+CWE_ZIP = "https://cwe.mitre.org/data/xml/cwec_latest.xml.zip"
 
 
 def save_json(file_name, data):
     with open(file_name, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def read_json(file_name):
+    with open(file_name, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def parse_date(value):
@@ -80,13 +91,119 @@ def task_1():
     print("task 1:", len(result))
 
 
+def download_cwe():
+    cache = Path("cwec_latest.xml")
+    if not cache.exists():
+        zip_name = "cwec_latest.xml.zip"
+        Path(zip_name).write_bytes(requests.get(CWE_ZIP, timeout=60).content)
+        with zipfile.ZipFile(zip_name) as z:
+            xml_name = [name for name in z.namelist() if name.endswith(".xml")][0]
+            cache.write_bytes(z.read(xml_name))
+    return cache
+
+
+def get_cwe_dict():
+    root = ET.parse(download_cwe()).getroot()
+    result = {}
+    for weakness in root.findall(".//{*}Weakness"):
+        cwe_id = "CWE-" + weakness.attrib["ID"]
+        result[cwe_id] = {
+            "name": weakness.attrib.get("Name", ""),
+            "description": weakness.findtext("{*}Description", default=""),
+        }
+    return result
+
+
+def get_description(record):
+    descriptions = record.get("containers", {}).get("cna", {}).get("descriptions", [])
+    for item in descriptions:
+        if item.get("lang") == "en":
+            return re.sub(r"\s+", " ", item.get("value", "")).strip()
+    return ""
+
+
+def get_cvss(record):
+    result = []
+    metrics = record.get("containers", {}).get("cna", {}).get("metrics", [])
+    for adp in record.get("containers", {}).get("adp", []):
+        metrics += adp.get("metrics", [])
+
+    for metric in metrics:
+        for key in ["cvssV4_0", "cvssV3_1", "cvssV3_0", "cvssV2_0"]:
+            if key not in metric:
+                continue
+            item = metric[key]
+            result.append({
+                "version": "cvss" + item.get("version", "").replace(".", ""),
+                "score": item.get("baseScore"),
+                "vector": item.get("vectorString", ""),
+                "severity": item.get("baseSeverity", ""),
+            })
+    return result
+
+
+def get_cpe(record):
+    result = []
+    affected = record.get("containers", {}).get("cna", {}).get("affected", [])
+    for item in affected:
+        result += item.get("cpes", [])
+        for version in item.get("versions", []):
+            result += version.get("cpes", [])
+    return sorted(set(result))
+
+
+def get_cwe(record, cwe_dict):
+    result = {}
+    problem_types = record.get("containers", {}).get("cna", {}).get("problemTypes", [])
+    for problem_type in problem_types:
+        for description in problem_type.get("descriptions", []):
+            cwe_id = description.get("cweId")
+            if cwe_id and cwe_id.startswith("CWE-"):
+                result[cwe_id] = cwe_dict.get(cwe_id, {
+                    "name": description.get("description", cwe_id),
+                    "description": description.get("description", cwe_id),
+                })
+    return result
+
+
+def task_2():
+    cwe_dict = get_cwe_dict()
+    result = []
+
+    for row in read_json("result_task_1.json"):
+        for i in range(3):
+            try:
+                record = requests.get(CVE_API + row["ID"], timeout=30).json()
+                break
+            except requests.RequestException:
+                if i == 2:
+                    raise
+
+        result.append({
+            **row,
+            "url": CVE_URL + row["ID"],
+            "published_date": record.get("cveMetadata", {}).get("datePublished", ""),
+            "updated_date": record.get("cveMetadata", {}).get("dateUpdated", ""),
+            "description": get_description(record),
+            "cvss_list": get_cvss(record),
+            "cpe_list": get_cpe(record),
+            "cwe": get_cwe(record, cwe_dict),
+        })
+        print(row["ID"], flush=True)
+
+    save_json("result_task_2.json", result)
+    print("task 2:", len(result))
+
+
 def main():
     if len(sys.argv) < 2:
-        print("usage: python main.py task1")
+        print("usage: python main.py task1|task2")
         return
 
     if sys.argv[1] == "task1":
         task_1()
+    elif sys.argv[1] == "task2":
+        task_2()
 
 
 if __name__ == "__main__":
