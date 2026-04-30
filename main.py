@@ -260,7 +260,7 @@ def task_4():
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: python main.py task1|task2|task3|task4")
+        print("usage: python main.py task1|task2|task3|task4|all")
         return
 
     if sys.argv[1] == "task1":
@@ -270,6 +270,11 @@ def main():
     elif sys.argv[1] == "task3":
         task_3()
     elif sys.argv[1] == "task4":
+        task_4()
+    elif sys.argv[1] == "all":
+        task_1()
+        task_2()
+        task_3()
         task_4()
 
 
