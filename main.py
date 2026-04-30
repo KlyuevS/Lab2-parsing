@@ -4,6 +4,7 @@ import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
 import requests
@@ -195,15 +196,63 @@ def task_2():
     print("task 2:", len(result))
 
 
+def task_3():
+    root = ET.Element("vulnerabilities")
+
+    for row in read_json("result_task_2.json"):
+        item = ET.SubElement(root, "vulnerability")
+
+        for key in [
+            "ID",
+            "vendor_release_date",
+            "vendor_release_url",
+            "url",
+            "published_date",
+            "updated_date",
+            "description",
+        ]:
+            child = ET.SubElement(item, key)
+            child.text = str(row.get(key, ""))
+
+        cvss_list = ET.SubElement(item, "cvss_list")
+        for cvss in row["cvss_list"]:
+            child = ET.SubElement(cvss_list, "cvss", {
+                "version": str(cvss["version"]),
+                "score": str(cvss["score"]),
+                "severity": str(cvss["severity"]),
+            })
+            child.text = cvss["vector"]
+
+        cpe_list = ET.SubElement(item, "cpe_list")
+        for cpe in row["cpe_list"]:
+            child = ET.SubElement(cpe_list, "cpe")
+            child.text = cpe
+
+        cwe_list = ET.SubElement(item, "cwe_list")
+        for cwe_id, cwe in row["cwe"].items():
+            child = ET.SubElement(cwe_list, "cwe", {
+                "id": cwe_id,
+                "name": cwe["name"],
+            })
+            child.text = cwe["description"]
+
+    xml = ET.tostring(root, encoding="utf-8")
+    pretty_xml = minidom.parseString(xml).toprettyxml(indent="  ", encoding="utf-8")
+    Path("result_task_3.xml").write_bytes(pretty_xml)
+    print("task 3")
+
+
 def main():
     if len(sys.argv) < 2:
-        print("usage: python main.py task1|task2")
+        print("usage: python main.py task1|task2|task3")
         return
 
     if sys.argv[1] == "task1":
         task_1()
     elif sys.argv[1] == "task2":
         task_2()
+    elif sys.argv[1] == "task3":
+        task_3()
 
 
 if __name__ == "__main__":
