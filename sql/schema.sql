@@ -1,5 +1,6 @@
 create table if not exists vulnerability (
-    id text primary key,
+    id bigserial primary key,
+    name text not null unique,
     vendor_release_date date not null,
     vendor_release_url text not null,
     url text not null,
@@ -10,11 +11,12 @@ create table if not exists vulnerability (
 
 create table if not exists cvss_score (
     id bigserial primary key,
-    cve_id text not null references vulnerability(id),
+    vulnerability_id bigint not null references vulnerability(id),
     version text not null,
     score numeric(3, 1),
     vector text not null,
-    severity text not null
+    severity text not null,
+    unique (vulnerability_id, version, vector)
 );
 
 create table if not exists cpe (
@@ -23,19 +25,21 @@ create table if not exists cpe (
 );
 
 create table if not exists vulnerability_cpe (
-    cve_id text not null references vulnerability(id),
+    vulnerability_id bigint not null references vulnerability(id),
     cpe_id bigint not null references cpe(id),
-    primary key (cve_id, cpe_id)
+    primary key (vulnerability_id, cpe_id)
 );
 
 create table if not exists cwe (
-    id text primary key,
+    id bigserial primary key,
     name text not null,
-    description text not null
+    title text not null,
+    description text not null,
+    unique (name)
 );
 
 create table if not exists vulnerability_cwe (
-    cve_id text not null references vulnerability(id),
-    cwe_id text not null references cwe(id),
-    primary key (cve_id, cwe_id)
+    vulnerability_id bigint not null references vulnerability(id),
+    cwe_id bigint not null references cwe(id),
+    primary key (vulnerability_id, cwe_id)
 );

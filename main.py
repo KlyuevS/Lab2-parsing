@@ -1,9 +1,12 @@
 import json
 import re
+import subprocess
 import sys
-import zipfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from urllib.request import Request, urlopen
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
@@ -15,7 +18,7 @@ from jsonschema import Draft202012Validator
 SOURCE_URL = "https://tomcat.apache.org/security-9.html"
 CVE_API = "https://cveawg.mitre.org/api/cve/"
 CVE_URL = "https://www.cve.org/CVERecord?id="
-CWE_ZIP = "https://cwe.mitre.org/data/xml/cwec_latest.xml.zip"
+CWE_API = "https://cwe-api.mitre.org/api/v1/cwe/weakness/"
 
 
 def save_json(file_name, data):
@@ -93,27 +96,40 @@ def task_1():
     print("task 1:", len(result))
 
 
-def download_cwe():
-    cache = Path("cwec_latest.xml")
-    if not cache.exists():
-        zip_name = "cwec_latest.xml.zip"
-        Path(zip_name).write_bytes(requests.get(CWE_ZIP, timeout=60).content)
-        with zipfile.ZipFile(zip_name) as z:
-            xml_name = [name for name in z.namelist() if name.endswith(".xml")][0]
-            cache.write_bytes(z.read(xml_name))
-    return cache
+def get_json(url):
+    for i in range(6):
+        try:
+            result = subprocess.run(
+                ["curl", "-L", "--fail", "--silent", "--connect-timeout", "10", "--max-time", "30", url],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return json.loads(result.stdout)
+        except Exception:
+            pass
+
+        try:
+            request = Request(url, headers={"User-Agent": "lab2-parser"})
+            with urlopen(request, timeout=15) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception:
+            if i == 5:
+                raise
+            time.sleep(1)
 
 
-def get_cwe_dict():
-    root = ET.parse(download_cwe()).getroot()
-    result = {}
-    for weakness in root.findall(".//{*}Weakness"):
-        cwe_id = "CWE-" + weakness.attrib["ID"]
-        result[cwe_id] = {
-            "name": weakness.attrib.get("Name", ""),
-            "description": weakness.findtext("{*}Description", default=""),
-        }
-    return result
+def read_cache(path):
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def write_cache(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
 
 
 def get_description(record):
@@ -126,6 +142,7 @@ def get_description(record):
 
 def get_cvss(record):
     result = []
+    used = set()
     metrics = record.get("containers", {}).get("cna", {}).get("metrics", [])
     for adp in record.get("containers", {}).get("adp", []):
         metrics += adp.get("metrics", [])
@@ -135,6 +152,10 @@ def get_cvss(record):
             if key not in metric:
                 continue
             item = metric[key]
+            pair = (key, item.get("vectorString", ""))
+            if pair in used:
+                continue
+            used.add(pair)
             result.append({
                 "version": "cvss" + item.get("version", "").replace(".", ""),
                 "score": item.get("baseScore"),
@@ -144,6 +165,13 @@ def get_cvss(record):
     return result
 
 
+def cpe_part(value):
+    value = value.lower().strip()
+    value = value.replace("apache software foundation", "apache")
+    value = value.replace("apache tomcat", "tomcat")
+    return re.sub(r"[^a-z0-9._-]+", "_", value).strip("_")
+
+
 def get_cpe(record):
     result = []
     affected = record.get("containers", {}).get("cna", {}).get("affected", [])
@@ -151,36 +179,76 @@ def get_cpe(record):
         result += item.get("cpes", [])
         for version in item.get("versions", []):
             result += version.get("cpes", [])
+
+        vendor = cpe_part(item.get("vendor", ""))
+        product = cpe_part(item.get("product", ""))
+        if vendor and product:
+            result.append(f"cpe:2.3:a:{vendor}:{product}:*:*:*:*:*:*:*:*")
+
     return sorted(set(result))
 
 
-def get_cwe(record, cwe_dict):
-    result = {}
-    problem_types = record.get("containers", {}).get("cna", {}).get("problemTypes", [])
+def get_cwe_ids(record):
+    result = set()
+    containers = [record.get("containers", {}).get("cna", {})]
+    containers += record.get("containers", {}).get("adp", [])
+
+    problem_types = []
+    for container in containers:
+        problem_types += container.get("problemTypes", [])
+
     for problem_type in problem_types:
         for description in problem_type.get("descriptions", []):
             cwe_id = description.get("cweId")
             if cwe_id and cwe_id.startswith("CWE-"):
-                result[cwe_id] = cwe_dict.get(cwe_id, {
-                    "name": description.get("description", cwe_id),
-                    "description": description.get("description", cwe_id),
-                })
+                result.add(cwe_id)
+            for cwe_id in re.findall(r"CWE-\d+", description.get("description", "")):
+                result.add(cwe_id)
+    return sorted(result)
+
+
+def get_cwe_info(cwe_ids):
+    result = {}
+    cwe_ids = sorted(cwe_ids)
+    for i in range(0, len(cwe_ids), 50):
+        part = cwe_ids[i:i + 50]
+        numbers = [cwe_id.replace("CWE-", "") for cwe_id in part]
+        data = get_json(CWE_API + ",".join(numbers))
+        for weakness in data.get("Weaknesses", []):
+            cwe_id = "CWE-" + weakness.get("ID", "")
+            result[cwe_id] = {
+                "name": weakness.get("Name", cwe_id),
+                "description": weakness.get("Description", cwe_id),
+            }
+    for cwe_id in cwe_ids:
+        result.setdefault(cwe_id, {"name": cwe_id, "description": cwe_id})
     return result
 
 
+def load_cve(row):
+    cache = Path(".cache/cve") / (row["ID"] + ".json")
+    record = read_cache(cache)
+    if record is None:
+        record = get_json(CVE_API + row["ID"])
+        write_cache(cache, record)
+    print(row["ID"], flush=True)
+    return row, record
+
+
 def task_2():
-    cwe_dict = get_cwe_dict()
+    rows = read_json("result_task_1.json")
+    loaded = []
+    cwe_ids = set()
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        for row, record in executor.map(load_cve, rows):
+            loaded.append((row, record))
+            cwe_ids.update(get_cwe_ids(record))
+
+    cwe_dict = get_cwe_info(cwe_ids)
     result = []
 
-    for row in read_json("result_task_1.json"):
-        for i in range(3):
-            try:
-                record = requests.get(CVE_API + row["ID"], timeout=30).json()
-                break
-            except requests.RequestException:
-                if i == 2:
-                    raise
-
+    for row, record in loaded:
         result.append({
             **row,
             "url": CVE_URL + row["ID"],
@@ -189,9 +257,8 @@ def task_2():
             "description": get_description(record),
             "cvss_list": get_cvss(record),
             "cpe_list": get_cpe(record),
-            "cwe": get_cwe(record, cwe_dict),
+            "cwe": {cwe_id: cwe_dict[cwe_id] for cwe_id in get_cwe_ids(record)},
         })
-        print(row["ID"], flush=True)
 
     save_json("result_task_2.json", result)
     print("task 2:", len(result))
@@ -253,9 +320,21 @@ def task_4():
         print("validation ok")
         return
 
+    print("validation failed")
+
+    for field in ["cvss_list", "cpe_list", "cwe"]:
+        ids = [row["ID"] for row in data if not row[field]]
+        if ids:
+            print(field + ":", ", ".join(ids))
+
+    other_errors = []
     for error in errors:
         path = "$" + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in error.path)
-        print(path, error.message)
+        if not any(path.endswith("." + field) for field in ["cvss_list", "cpe_list", "cwe"]):
+            other_errors.append((path, error.message))
+
+    for path, message in other_errors:
+        print(path, message)
 
 
 def main():

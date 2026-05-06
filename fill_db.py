@@ -17,9 +17,16 @@ def main():
                 cur.execute(
                     """
                     insert into vulnerability
-                    (id, vendor_release_date, vendor_release_url, url, published_date, updated_date, description)
+                    (name, vendor_release_date, vendor_release_url, url, published_date, updated_date, description)
                     values (%s, %s, %s, %s, %s, %s, %s)
-                    on conflict (id) do nothing
+                    on conflict (name) do update set
+                        vendor_release_date = excluded.vendor_release_date,
+                        vendor_release_url = excluded.vendor_release_url,
+                        url = excluded.url,
+                        published_date = excluded.published_date,
+                        updated_date = excluded.updated_date,
+                        description = excluded.description
+                    returning id
                     """,
                     (
                         row["ID"],
@@ -31,14 +38,18 @@ def main():
                         row["description"],
                     ),
                 )
+                vulnerability_id = cur.fetchone()[0]
 
                 for cvss in row["cvss_list"]:
                     cur.execute(
                         """
-                        insert into cvss_score (cve_id, version, score, vector, severity)
+                        insert into cvss_score (vulnerability_id, version, score, vector, severity)
                         values (%s, %s, %s, %s, %s)
+                        on conflict (vulnerability_id, version, vector) do update set
+                            score = excluded.score,
+                            severity = excluded.severity
                         """,
-                        (row["ID"], cvss["version"], cvss["score"], cvss["vector"], cvss["severity"]),
+                        (vulnerability_id, cvss["version"], cvss["score"], cvss["vector"], cvss["severity"]),
                     )
 
                 for cpe in row["cpe_list"]:
@@ -48,22 +59,26 @@ def main():
                     )
                     cpe_id = cur.fetchone()[0]
                     cur.execute(
-                        "insert into vulnerability_cpe (cve_id, cpe_id) values (%s, %s) on conflict do nothing",
-                        (row["ID"], cpe_id),
+                        "insert into vulnerability_cpe (vulnerability_id, cpe_id) values (%s, %s) on conflict do nothing",
+                        (vulnerability_id, cpe_id),
                     )
 
                 for cwe_id, cwe in row["cwe"].items():
                     cur.execute(
                         """
-                        insert into cwe (id, name, description)
+                        insert into cwe (name, title, description)
                         values (%s, %s, %s)
-                        on conflict (id) do update set name = excluded.name, description = excluded.description
+                        on conflict (name) do update set
+                            title = excluded.title,
+                            description = excluded.description
+                        returning id
                         """,
                         (cwe_id, cwe["name"], cwe["description"]),
                     )
+                    cwe_pk = cur.fetchone()[0]
                     cur.execute(
-                        "insert into vulnerability_cwe (cve_id, cwe_id) values (%s, %s) on conflict do nothing",
-                        (row["ID"], cwe_id),
+                        "insert into vulnerability_cwe (vulnerability_id, cwe_id) values (%s, %s) on conflict do nothing",
+                        (vulnerability_id, cwe_pk),
                     )
 
         conn.commit()
@@ -72,4 +87,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
