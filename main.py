@@ -172,7 +172,119 @@ def cpe_part(value):
     return re.sub(r"[^a-z0-9._-]+", "_", value).strip("_")
 
 
-def get_cpe(record):
+def parse_product_version(value):
+    value = value.strip()
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-.]M(\d+)|[.]RC(\d+))?$", value)
+    if not match:
+        return None
+    major, minor, patch, milestone, rc = match.groups()
+    update = "*"
+    if milestone:
+        update = "milestone" + milestone
+    if rc:
+        update = "rc" + rc
+    return int(major), int(minor), int(patch), update
+
+
+def make_cpe(vendor, product, version_value):
+    parsed = parse_product_version(version_value)
+    if not parsed:
+        return ""
+    major, minor, patch, update = parsed
+    version = f"{major}.{minor}.{patch}"
+    return f"cpe:2.3:a:{vendor}:{product}:{version}:{update}:*:*:*:*:*:*"
+
+
+def expand_versions(start_value, end_value="", include_end=True):
+    start = parse_product_version(start_value)
+    if not start:
+        return [start_value]
+    if not end_value:
+        return [start_value]
+
+    end = parse_product_version(end_value)
+    if not end:
+        return [start_value, end_value]
+
+    start_major, start_minor, start_patch, start_update = start
+    end_major, end_minor, end_patch, end_update = end
+
+    if start_major != end_major or start_minor != end_minor:
+        return [start_value, end_value] if include_end else [start_value]
+
+    result = []
+
+    if start_update != "*":
+        result.append(start_value)
+        start_patch += 1
+
+    last_patch = end_patch if include_end else end_patch - 1
+    if end_update != "*":
+        last_patch = end_patch - 1
+
+    if last_patch >= start_patch and last_patch - start_patch <= 300:
+        for patch in range(start_patch, last_patch + 1):
+            result.append(f"{start_major}.{start_minor}.{patch}")
+
+    if include_end and end_update != "*":
+        result.append(end_value)
+
+    return result or [start_value]
+
+
+def version_tokens(value):
+    return re.findall(r"\d+\.\d+\.\d+(?:[-.]M\d+|[.]RC\d+)?", value)
+
+
+def infer_start_version(raw_version, end_value):
+    end = parse_product_version(end_value)
+    if not end:
+        return ""
+    major, minor, _patch, end_update = end
+    if end_update.startswith("milestone"):
+        return f"{major}.{minor}.0-M1"
+    if re.search(rf"\b{major}\.{minor}\b", raw_version):
+        return f"{major}.{minor}.0"
+    return ""
+
+
+def get_versions_from_record(version):
+    raw_version = version.get("version", "")
+    tokens = version_tokens(raw_version)
+
+    if " to " in raw_version and len(tokens) >= 2:
+        start, end = tokens[-2], tokens[-1]
+        return expand_versions(start, end)
+
+    if version.get("lessThanOrEqual"):
+        start = tokens[-1] if tokens else infer_start_version(raw_version, version["lessThanOrEqual"])
+        return expand_versions(start, version["lessThanOrEqual"]) if start else []
+
+    if version.get("lessThan"):
+        start = tokens[-1] if tokens else infer_start_version(raw_version, version["lessThan"])
+        return expand_versions(start, version["lessThan"], include_end=False) if start else []
+
+    return tokens or ([raw_version] if parse_product_version(raw_version) else [])
+
+
+def previous_fixed_version(row):
+    match = re.search(r"Fixed_in_Apache_Tomcat_(\d+)\.(\d+)\.(\d+)[.]M(\d+)", row.get("vendor_release_url", ""))
+    if match:
+        major, minor, patch, milestone = map(int, match.groups())
+        if milestone > 1:
+            return f"{major}.{minor}.{patch}-M{milestone - 1}"
+        return ""
+
+    match = re.search(r"Fixed_in_Apache_Tomcat_(\d+)\.(\d+)\.(\d+)", row.get("vendor_release_url", ""))
+    if not match:
+        return ""
+    major, minor, patch = map(int, match.groups())
+    if patch == 0:
+        return ""
+    return f"{major}.{minor}.{patch - 1}"
+
+
+def get_cpe(record, row=None):
     result = []
     affected = record.get("containers", {}).get("cna", {}).get("affected", [])
     for item in affected:
@@ -183,7 +295,18 @@ def get_cpe(record):
         vendor = cpe_part(item.get("vendor", ""))
         product = cpe_part(item.get("product", ""))
         if vendor and product:
-            result.append(f"cpe:2.3:a:{vendor}:{product}:*:*:*:*:*:*:*:*")
+            for version in item.get("versions", []):
+                if version.get("status") == "unaffected":
+                    continue
+                for value in get_versions_from_record(version):
+                    cpe = make_cpe(vendor, product, value)
+                    if cpe:
+                        result.append(cpe)
+
+    if not result and row:
+        version = previous_fixed_version(row)
+        if version:
+            result.append(make_cpe("apache", "tomcat", version))
 
     return sorted(set(result))
 
@@ -256,7 +379,7 @@ def task_2():
             "updated_date": record.get("cveMetadata", {}).get("dateUpdated", ""),
             "description": get_description(record),
             "cvss_list": get_cvss(record),
-            "cpe_list": get_cpe(record),
+            "cpe_list": get_cpe(record, row),
             "cwe": {cwe_id: cwe_dict[cwe_id] for cwe_id in get_cwe_ids(record)},
         })
 
